@@ -13,7 +13,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
-	"strings"
 )
 
 const (
@@ -26,6 +25,11 @@ var (
 	jobIDRegex = regexp.MustCompile(`job=~?"([0-9a-fA-F\-]{36}(?:\|[0-9a-fA-F\-]{36}){0,5})"`)
 	Cb         *CouchbaseClient
 )
+
+func (ps *ProxyServer) fetchFromCouchbase(jobID string) (int64, int64, error) {
+	log.Printf("implement this for %s", jobID)
+	return Cb.GetTimeframe(jobID)
+}
 
 func NewProxyServer(targetURL string) (*ProxyServer, error) {
 	target, err := url.Parse(targetURL)
@@ -55,11 +59,6 @@ func NewProxyServer(targetURL string) (*ProxyServer, error) {
 	ps.proxy.ModifyResponse = ps.modifyResponse
 
 	return ps, nil
-}
-
-func (ps *ProxyServer) fetchFromCouchbase(jobID string) (int64, int64, error) {
-	log.Printf("implement this for %s", jobID)
-	return Cb.GetTimeframe(jobID)
 }
 
 func (ps *ProxyServer) inspectRequest(req *http.Request) {
@@ -94,36 +93,6 @@ func (ps *ProxyServer) inspectRequest(req *http.Request) {
 	log.Printf("DEBUG: Found ID in query: %s", jobID)
 }
 
-func extractJobIDs(query string) []string {
-	match := jobIDRegex.FindStringSubmatch(query)
-	if len(match) < 2 {
-		return nil
-	}
-
-	parts := strings.Split(match[1], "|")
-	jobIDs := make([]string, 0, len(parts))
-	for _, jobID := range parts {
-		jobID = strings.TrimSpace(jobID)
-		if jobID == "" {
-			continue
-		}
-		jobIDs = append(jobIDs, jobID)
-	}
-
-	return jobIDs
-}
-
-func replaceJobFilter(query, jobID string) string {
-	return jobIDRegex.ReplaceAllString(query, fmt.Sprintf(`job="%s"`, jobID))
-}
-
-func overwriteTimeframe(targetURL *url.URL, tsStart, tsEnd int64) {
-	q := targetURL.Query()
-	q.Set("start", fmt.Sprintf("%d", tsStart))
-	q.Set("end", fmt.Sprintf("%d", tsEnd))
-	targetURL.RawQuery = q.Encode()
-}
-
 func decodeHTTPBody(resp *http.Response) ([]byte, error) {
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		reader, err := gzip.NewReader(resp.Body)
@@ -135,29 +104,6 @@ func decodeHTTPBody(resp *http.Response) ([]byte, error) {
 	}
 
 	return io.ReadAll(resp.Body)
-}
-
-func applyTimeframeOffset(promData *PromResponse, tsStart int64) {
-	for i := range promData.Data.Result {
-		for j := range promData.Data.Result[i].Values {
-			if len(promData.Data.Result[i].Values[j]) == 0 {
-				continue
-			}
-
-			rawTs := promData.Data.Result[i].Values[j][0]
-			var ts int64
-			switch v := rawTs.(type) {
-			case float64:
-				ts = int64(v)
-			case int64:
-				ts = v
-			default:
-				log.Printf("Unexpected timestamp type: %T", rawTs)
-				continue
-			}
-			promData.Data.Result[i].Values[j][0] = (ts - tsStart) 
-		}
-	}
 }
 
 func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -220,7 +166,7 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			continue
 		}
 
-		applyTimeframeOffset(&promData, tsStart)
+		applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
 		merged.Data.Result = append(merged.Data.Result, promData.Data.Result...)
 
 		if firstResp == nil {
@@ -302,37 +248,7 @@ func (ps *ProxyServer) modifyResponse(resp *http.Response) error {
 			return nil
 		}
 
-		var filtered []Result
-		for i, result := range promData.Data.Result {
-			jobID, ok := result.Metric["job"]
-			if !ok {
-				log.Printf("Error: result[%d] has no 'job' field in metric, dropping series", i)
-				continue
-			}
-			tsStart, found := jobMap[jobID]
-			if !found {
-				log.Printf("Error: job %q not found in jobMap, dropping series", jobID)
-				continue
-			}
-			for j := range result.Values {
-				if len(promData.Data.Result[i].Values[j]) > 0 {
-					rawTs := promData.Data.Result[i].Values[j][0]
-					var ts int64
-					switch v := rawTs.(type) {
-					case float64:
-						ts = int64(v)
-					case int64:
-						ts = v
-					default:
-						log.Printf("Unexpected timestamp type: %T", rawTs)
-						continue
-					}
-					promData.Data.Result[i].Values[j][0] = (ts - tsStart)
-				}
-			}
-			filtered = append(filtered, promData.Data.Result[i])
-		}
-		promData.Data.Result = filtered
+		applyJobOffsetsAndFilter(&promData, jobMap)
 
 		if modifiedBody, err := json.Marshal(promData); err == nil {
 			bodyBytes = modifiedBody
