@@ -7,16 +7,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-type AppConfig struct {
-	ListenAddr                 string
-	Prefix                     string
-	CouchbaseConnectionString  string
-	Username                   string
-	Password                   string
-	MetadataBucketName         string
-	PrometheusConnectionString string
-}
-
 func loadConfig() (AppConfig, error) {
 	if err := godotenv.Load(); err != nil {
 		return AppConfig{}, fmt.Errorf("load .env: %w", err)

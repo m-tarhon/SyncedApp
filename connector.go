@@ -8,17 +8,6 @@ import (
 	"github.com/couchbase/gocb/v2"
 )
 
-type CouchbaseClient struct {
-	Cluster *gocb.Cluster
-	Bucket  *gocb.Bucket
-}
-
-type Metadata struct {
-	Id       string `json:"id"`
-	Ts_start string `json:"ts_start"`
-	Ts_end   string `json:"ts_end"`
-}
-
 func ConnectCouchbase(connectionString, username, password, bucketName string) (*CouchbaseClient, error) {
 	opts := gocb.ClusterOptions{
 		Authenticator: gocb.PasswordAuthenticator{

@@ -27,11 +27,6 @@ var (
 	Cb         *CouchbaseClient
 )
 
-type splitQueryTransport struct {
-	base http.RoundTripper
-	ps   *ProxyServer
-}
-
 func NewProxyServer(targetURL string) (*ProxyServer, error) {
 	target, err := url.Parse(targetURL)
 	if err != nil {
@@ -160,7 +155,7 @@ func applyTimeframeOffset(promData *PromResponse, tsStart int64) {
 				log.Printf("Unexpected timestamp type: %T", rawTs)
 				continue
 			}
-			promData.Data.Result[i].Values[j][0] = ts - tsStart
+			promData.Data.Result[i].Values[j][0] = (ts - tsStart) 
 		}
 	}
 }
@@ -332,7 +327,7 @@ func (ps *ProxyServer) modifyResponse(resp *http.Response) error {
 						log.Printf("Unexpected timestamp type: %T", rawTs)
 						continue
 					}
-					promData.Data.Result[i].Values[j][0] = ts - tsStart
+					promData.Data.Result[i].Values[j][0] = (ts - tsStart)
 				}
 			}
 			filtered = append(filtered, promData.Data.Result[i])
