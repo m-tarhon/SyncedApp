@@ -3,8 +3,13 @@ module synced_app
 go 1.24.0
 
 require (
+	github.com/couchbase/gocb/v2 v2.12.0
+	github.com/joho/godotenv v1.5.1
+	golang.org/x/sync v0.19.0
+)
+
+require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/couchbase/gocb/v2 v2.12.0 // indirect
 	github.com/couchbase/gocbcore/v10 v10.9.0 // indirect
 	github.com/couchbase/gocbcoreps v0.1.5-0.20260107140814-1c3a03f888f8 // indirect
 	github.com/couchbase/goprotostellar v1.0.5 // indirect
@@ -14,7 +19,6 @@ require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/joho/godotenv v1.5.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.65.0 // indirect
 	go.opentelemetry.io/otel v1.40.0 // indirect

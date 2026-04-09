@@ -13,6 +13,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -128,54 +130,95 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	merged.Status = "success"
 	merged.Data.ResultType = "matrix"
 
-	var firstResp *http.Response
+	type splitResult struct {
+		statusCode int
+		status     string
+		resultType string
+		result     []Result
+		success    bool
+	}
+
+	results := make([]splitResult, len(jobIDs))
+	g, gctx := errgroup.WithContext(req.Context())
+	g.SetLimit(6)
+
+	for idx, jobID := range jobIDs {
+		idx := idx
+		jobID := jobID
+
+		g.Go(func() error {
+			tsStart, tsEnd, err := t.ps.fetchFromCouchbase(jobID)
+			if err != nil {
+				log.Printf("Error fetching from Couchbase for %s: %v", jobID, err)
+				return nil
+			}
+
+			singleReq := req.Clone(gctx)
+			singleURL := *req.URL
+			q := singleURL.Query()
+			q.Set("query", replaceJobFilter(originalQuery, jobID))
+			singleURL.RawQuery = q.Encode()
+			overwriteTimeframe(&singleURL, tsStart, tsEnd)
+			singleReq.URL = &singleURL
+			singleReq.RequestURI = ""
+
+			resp, err := t.base.RoundTrip(singleReq)
+			if err != nil {
+				if gctx.Err() != nil {
+					return gctx.Err()
+				}
+				log.Printf("Error executing upstream request for %s: %v", jobID, err)
+				return nil
+			}
+
+			bodyBytes, err := decodeHTTPBody(resp)
+			resp.Body.Close()
+			if err != nil {
+				log.Printf("Error reading upstream response for %s: %v", jobID, err)
+				return nil
+			}
+
+			var promData PromResponse
+			if err := json.Unmarshal(bodyBytes, &promData); err != nil {
+				log.Printf("Failed to unmarshal upstream response for %s: %v", jobID, err)
+				return nil
+			}
+
+			applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
+
+			results[idx] = splitResult{
+				statusCode: resp.StatusCode,
+				status:     resp.Status,
+				resultType: promData.Data.ResultType,
+				result:     promData.Data.Result,
+				success:    true,
+			}
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
 	successCount := 0
+	statusCode := http.StatusOK
+	status := http.StatusText(http.StatusOK)
 
-	for _, jobID := range jobIDs {
-		tsStart, tsEnd, err := t.ps.fetchFromCouchbase(jobID)
-		if err != nil {
-			log.Printf("Error fetching from Couchbase for %s: %v", jobID, err)
+	for _, r := range results {
+		if !r.success {
 			continue
 		}
 
-		singleReq := req.Clone(req.Context())
-		singleURL := *req.URL
-		q := singleURL.Query()
-		q.Set("query", replaceJobFilter(originalQuery, jobID))
-		singleURL.RawQuery = q.Encode()
-		overwriteTimeframe(&singleURL, tsStart, tsEnd)
-		singleReq.URL = &singleURL
-		singleReq.RequestURI = ""
-
-		resp, err := t.base.RoundTrip(singleReq)
-		if err != nil {
-			log.Printf("Error executing upstream request for %s: %v", jobID, err)
-			continue
-		}
-
-		bodyBytes, err := decodeHTTPBody(resp)
-		resp.Body.Close()
-		if err != nil {
-			log.Printf("Error reading upstream response for %s: %v", jobID, err)
-			continue
-		}
-
-		var promData PromResponse
-		if err := json.Unmarshal(bodyBytes, &promData); err != nil {
-			log.Printf("Failed to unmarshal upstream response for %s: %v", jobID, err)
-			continue
-		}
-
-		applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
-		merged.Data.Result = append(merged.Data.Result, promData.Data.Result...)
-
-		if firstResp == nil {
-			firstResp = resp
-			if promData.Data.ResultType != "" {
-				merged.Data.ResultType = promData.Data.ResultType
+		merged.Data.Result = append(merged.Data.Result, r.result...)
+		if successCount == 0 {
+			statusCode = r.statusCode
+			status = r.status
+			if r.resultType != "" {
+				merged.Data.ResultType = r.resultType
 			}
 		}
-
 		successCount++
 	}
 
@@ -191,13 +234,6 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-
-	statusCode := http.StatusOK
-	status := http.StatusText(http.StatusOK)
-	if firstResp != nil {
-		statusCode = firstResp.StatusCode
-		status = firstResp.Status
-	}
 
 	return &http.Response{
 		Status:        status,
