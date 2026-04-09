@@ -36,6 +36,12 @@ func ConnectCouchbase(connectionString, username, password, bucketName string) (
 }
 
 func (cb *CouchbaseClient) GetTimeframe(id string) (int64, int64, error) {
+	if entry, found := cb.Cache.Load(id); found {
+		if timeframe, ok := entry.(TimeframeEntry); ok && time.Since(timeframe.FetchedAt) < 24*time.Hour {
+			log.Printf("Cache hit for job %s: start=%d, end=%d", id, timeframe.Start, timeframe.End)
+			return timeframe.Start, timeframe.End, nil
+		}
+	}
 	collection := cb.Bucket.DefaultCollection()
 
 	getResult, err := collection.Get(id, nil)
@@ -62,8 +68,13 @@ func (cb *CouchbaseClient) GetTimeframe(id string) (int64, int64, error) {
 
 	start := tsStart.Unix()
 	end := tsEnd.Unix()
-	log.Printf("Fetched start time for job %s: %s (Unix s: %d)", id, metadata.Ts_start, start)
-	log.Printf("Fetched end time for job %s: %s (Unix s: %d)", id, metadata.Ts_end, end)
+	cb.Cache.Store(id, TimeframeEntry{
+		Start:     start,
+		End:       end,
+		FetchedAt: time.Now(),
+	})
+	// log.Printf("Fetched start time for job %s: %s (Unix s: %d)", id, metadata.Ts_start, start)
+	// log.Printf("Fetched end time for job %s: %s (Unix s: %d)", id, metadata.Ts_end, end)
 
 	return start, end, nil
 }

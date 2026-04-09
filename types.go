@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
+	"sync"
 
 	"github.com/couchbase/gocb/v2"
 )
@@ -51,10 +53,17 @@ type AppConfig struct {
 type CouchbaseClient struct {
 	Cluster *gocb.Cluster
 	Bucket  *gocb.Bucket
+	Cache  	sync.Map
 }
 
 type Metadata struct {
 	Id       string `json:"id"`
 	Ts_start string `json:"ts_start"`
 	Ts_end   string `json:"ts_end"`
+}
+
+// metadata cache types
+type TimeframeEntry struct{
+	Start, End  	int64
+	FetchedAt 		time.Time
 }
