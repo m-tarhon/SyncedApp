@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
@@ -20,6 +21,7 @@ func loadConfig() (AppConfig, error) {
 		Password:                   os.Getenv("PASSWORD"),
 		MetadataBucketName:         os.Getenv("METADATA_BUCKET_NAME"),
 		PrometheusConnectionString: os.Getenv("PROMETHEUS_CONNECTION_STRING"),
+		DebugLogging:               getEnvAsBool("DEBUG_LOGGING", false),
 	}
 
 	if config.CouchbaseConnectionString == "" {
@@ -47,4 +49,32 @@ func getEnvOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func getEnvAsBool(key string, fallback bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
+}
+
+func getEnvAsInt(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+
+	return parsed
 }

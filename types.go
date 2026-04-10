@@ -4,19 +4,19 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"time"
 	"sync"
+	"time"
 
 	"github.com/couchbase/gocb/v2"
 )
 
-type contextKey string 
+type contextKey string
 
 // prometheus response types
 type PromResponse struct {
 	Status string `json:"status"`
 	Data   struct {
-		ResultType string `json:"resultType"`
+		ResultType string   `json:"resultType"`
 		Result     []Result `json:"result"`
 	} `json:"data"`
 }
@@ -26,10 +26,11 @@ type Result struct {
 	Values [][]interface{}   `json:"values"`
 }
 
-// server specific types 
+// server specific types
 type ProxyServer struct {
 	target  *url.URL
 	proxy   *httputil.ReverseProxy
+	Debug   bool
 	Verbose bool
 }
 
@@ -38,7 +39,7 @@ type splitQueryTransport struct {
 	ps   *ProxyServer
 }
 
-// config related types 
+// config related types
 type AppConfig struct {
 	ListenAddr                 string
 	Prefix                     string
@@ -47,13 +48,15 @@ type AppConfig struct {
 	Password                   string
 	MetadataBucketName         string
 	PrometheusConnectionString string
+	DebugLogging               bool
 }
 
-// couchbase client types 
+// couchbase client types
 type CouchbaseClient struct {
 	Cluster *gocb.Cluster
 	Bucket  *gocb.Bucket
-	Cache  	sync.Map
+	Debug   bool
+	Cache   sync.Map
 }
 
 type Metadata struct {
@@ -63,7 +66,7 @@ type Metadata struct {
 }
 
 // metadata cache types
-type TimeframeEntry struct{
-	Start, End  	int64
-	FetchedAt 		time.Time
+type TimeframeEntry struct {
+	Start, End int64
+	FetchedAt  time.Time
 }

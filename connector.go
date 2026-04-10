@@ -8,7 +8,7 @@ import (
 	"github.com/couchbase/gocb/v2"
 )
 
-func ConnectCouchbase(connectionString, username, password, bucketName string) (*CouchbaseClient, error) {
+func ConnectCouchbase(connectionString, username, password, bucketName string, debug bool) (*CouchbaseClient, error) {
 	opts := gocb.ClusterOptions{
 		Authenticator: gocb.PasswordAuthenticator{
 			Username: username,
@@ -32,13 +32,14 @@ func ConnectCouchbase(connectionString, username, password, bucketName string) (
 	return &CouchbaseClient{
 		Cluster: cluster,
 		Bucket:  bucket,
+		Debug:   debug,
 	}, nil
 }
 
 func (cb *CouchbaseClient) GetTimeframe(id string) (int64, int64, error) {
 	if entry, found := cb.Cache.Load(id); found {
 		if timeframe, ok := entry.(TimeframeEntry); ok && time.Since(timeframe.FetchedAt) < 24*time.Hour {
-			log.Printf("Cache hit for job %s: start=%d, end=%d", id, timeframe.Start, timeframe.End)
+			cb.debugf("Cache hit for job %s: start=%d, end=%d", id, timeframe.Start, timeframe.End)
 			return timeframe.Start, timeframe.End, nil
 		}
 	}
@@ -77,4 +78,12 @@ func (cb *CouchbaseClient) GetTimeframe(id string) (int64, int64, error) {
 	// log.Printf("Fetched end time for job %s: %s (Unix s: %d)", id, metadata.Ts_end, end)
 
 	return start, end, nil
+}
+
+func (cb *CouchbaseClient) debugf(format string, args ...any) {
+	if !cb.Debug {
+		return
+	}
+
+	log.Printf(format, args...)
 }

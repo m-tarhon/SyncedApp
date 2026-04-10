@@ -1,12 +1,49 @@
 package main
 
 import (
+	"compress/gzip"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"strings"
 )
 
+// proxy server specific helpers
+func (ps *ProxyServer) debugf(format string, args ...any) {
+	if !ps.Debug {
+		return
+	}
+
+	log.Printf(format, args...)
+}
+
+// logResponseBody is the function you can comment in/out or toggle via ps.Verbose
+func (ps *ProxyServer) logResponseBody(contentType string, body []byte) {
+	if !ps.Verbose {
+		return
+	}
+	if contentType == "application/json" {
+		log.Printf("JSON Response: %s", string(body))
+	}
+}
+
+// response body helpers
+func decodeHTTPBody(resp *http.Response) ([]byte, error) {
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		reader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		defer reader.Close()
+		return io.ReadAll(reader)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// general
 func extractJobIDs(query string) []string {
 	match := jobIDRegex.FindStringSubmatch(query)
 	if len(match) < 2 {
@@ -30,6 +67,7 @@ func replaceJobFilter(query, jobID string) string {
 	return jobIDRegex.ReplaceAllString(query, fmt.Sprintf(`job="%s"`, jobID))
 }
 
+// request helpers
 func overwriteTimeframe(targetURL *url.URL, tsStart, tsEnd int64) {
 	q := targetURL.Query()
 	q.Set("start", fmt.Sprintf("%d", tsStart))
@@ -37,6 +75,7 @@ func overwriteTimeframe(targetURL *url.URL, tsStart, tsEnd int64) {
 	targetURL.RawQuery = q.Encode()
 }
 
+// prometheus response helpers
 func applyJobOffsetsAndFilter(promData *PromResponse, jobMap map[string]int64) {
 	filtered := make([]Result, 0, len(promData.Data.Result))
 
