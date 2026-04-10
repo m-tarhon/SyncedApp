@@ -13,13 +13,15 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 )
 
 const (
-	tsStartKey contextKey = "ts_start"
-	jobIDsKey  contextKey = "job_ids"
+	tsStartKey     contextKey = "ts_start"
+	jobIDsKey      contextKey = "job_ids"
+	passthroughKey contextKey = "passthrough"
 )
 
 var (
@@ -29,7 +31,6 @@ var (
 )
 
 func (ps *ProxyServer) fetchFromCouchbase(jobID string) (int64, int64, error) {
-	log.Printf("implement this for %s", jobID)
 	return Cb.GetTimeframe(jobID)
 }
 
@@ -69,6 +70,17 @@ func (ps *ProxyServer) inspectRequest(req *http.Request) {
 		return
 	}
 
+	// Instant queries with a "time" param are converted to range queries using
+	// the full Couchbase-stored timeframe; results are forwarded as-is (no offset shift).
+	isInstantQuery := strings.HasSuffix(req.URL.Path, "/api/v1/query") &&
+		req.URL.Query().Get("time") != ""
+	if isInstantQuery {
+		req.URL.Path = strings.TrimSuffix(req.URL.Path, "/query") + "/query_range"
+		q := req.URL.Query()
+		q.Del("time")
+		req.URL.RawQuery = q.Encode()
+	}
+
 	query := req.URL.Query().Get("query")
 	jobIDs := extractJobIDs(query)
 	if len(jobIDs) == 0 {
@@ -77,11 +89,13 @@ func (ps *ProxyServer) inspectRequest(req *http.Request) {
 
 	if len(jobIDs) > 1 {
 		ctx := context.WithValue(req.Context(), jobIDsKey, jobIDs)
+		if isInstantQuery {
+			ctx = context.WithValue(ctx, passthroughKey, true)
+		}
 		*req = *req.WithContext(ctx)
 		return
 	}
 
-	jobMap := make(map[string]int64)
 	jobID := jobIDs[0]
 	tsStart, tsEnd, err := ps.fetchFromCouchbase(jobID)
 	if err != nil {
@@ -89,7 +103,21 @@ func (ps *ProxyServer) inspectRequest(req *http.Request) {
 		return
 	}
 	overwriteTimeframe(req.URL, tsStart, tsEnd)
-	jobMap[jobID] = tsStart
+
+	if isInstantQuery {
+		// Ensure query_range has a step; use 60s if none provided.
+		q := req.URL.Query()
+		if q.Get("step") == "" {
+			q.Set("step", "60")
+			req.URL.RawQuery = q.Encode()
+		}
+		ctx := context.WithValue(req.Context(), passthroughKey, true)
+		*req = *req.WithContext(ctx)
+		log.Printf("DEBUG: passthrough range query for job: %s", jobID)
+		return
+	}
+
+	jobMap := map[string]int64{jobID: tsStart}
 	ctx := context.WithValue(req.Context(), tsStartKey, jobMap)
 	*req = *req.WithContext(ctx)
 	log.Printf("DEBUG: Found ID in query: %s", jobID)
@@ -124,7 +152,8 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		return t.base.RoundTrip(req)
 	}
 
-	log.Printf("Splitting multi-job query into %d upstream requests", len(jobIDs))
+	passthrough := req.Context().Value(passthroughKey) != nil
+	log.Printf("Splitting multi-job query into %d upstream requests (passthrough=%v)", len(jobIDs), passthrough)
 
 	var merged PromResponse
 	merged.Status = "success"
@@ -159,6 +188,11 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			q.Set("query", replaceJobFilter(originalQuery, jobID))
 			singleURL.RawQuery = q.Encode()
 			overwriteTimeframe(&singleURL, tsStart, tsEnd)
+			if passthrough && q.Get("step") == "" {
+				q2 := singleURL.Query()
+				q2.Set("step", "60")
+				singleURL.RawQuery = q2.Encode()
+			}
 			singleReq.URL = &singleURL
 			singleReq.RequestURI = ""
 
@@ -184,7 +218,9 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 				return nil
 			}
 
-			applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
+			if !passthrough {
+				applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
+			}
 
 			results[idx] = splitResult{
 				statusCode: resp.StatusCode,
@@ -322,7 +358,7 @@ func main() {
 	}
 
 	// toggle it here programmatically
-	server.Verbose = true
+	server.Verbose = false
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(config.Prefix, func(w http.ResponseWriter, r *http.Request) {
