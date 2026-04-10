@@ -4,10 +4,11 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"sync"
 	"time"
 
 	"github.com/couchbase/gocb/v2"
+	"github.com/hashicorp/golang-lru/v2/expirable"
+	"golang.org/x/sync/singleflight"
 )
 
 type contextKey string
@@ -56,7 +57,8 @@ type CouchbaseClient struct {
 	Cluster *gocb.Cluster
 	Bucket  *gocb.Bucket
 	Debug   bool
-	Cache   sync.Map
+	Cache   *expirable.LRU[string, TimeframeEntry]
+	Group   singleflight.Group
 }
 
 type Metadata struct {

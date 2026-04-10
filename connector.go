@@ -1,12 +1,21 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/couchbase/gocb/v2"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
+
+const (
+	timeframeCacheSize = 10000
+	timeframeCacheTTL  = 24 * time.Hour
+)
+
+var ErrUnexpectedTimeframeType = errors.New("unexpected timeframe cache value type")
 
 func ConnectCouchbase(connectionString, username, password, bucketName string, debug bool) (*CouchbaseClient, error) {
 	opts := gocb.ClusterOptions{
@@ -33,51 +42,66 @@ func ConnectCouchbase(connectionString, username, password, bucketName string, d
 		Cluster: cluster,
 		Bucket:  bucket,
 		Debug:   debug,
+		Cache:   expirable.NewLRU[string, TimeframeEntry](timeframeCacheSize, nil, timeframeCacheTTL),
 	}, nil
 }
 
 func (cb *CouchbaseClient) GetTimeframe(id string) (int64, int64, error) {
-	if entry, found := cb.Cache.Load(id); found {
-		if timeframe, ok := entry.(TimeframeEntry); ok && time.Since(timeframe.FetchedAt) < 24*time.Hour {
-			cb.debugf("Cache hit for job %s: start=%d, end=%d", id, timeframe.Start, timeframe.End)
-			return timeframe.Start, timeframe.End, nil
+	if timeframe, found := cb.Cache.Get(id); found {
+		cb.debugf("Cache hit for job %s: start=%d, end=%d", id, timeframe.Start, timeframe.End)
+		return timeframe.Start, timeframe.End, nil
+	}
+
+	value, err, shared := cb.Group.Do(id, func() (any, error) {
+		if timeframe, found := cb.Cache.Get(id); found {
+			return timeframe, nil
 		}
-	}
-	collection := cb.Bucket.DefaultCollection()
 
-	getResult, err := collection.Get(id, nil)
-	if err != nil {
-		return 0, 0, err
-	}
+		collection := cb.Bucket.DefaultCollection()
+		getResult, err := collection.Get(id, nil)
+		if err != nil {
+			return TimeframeEntry{}, err
+		}
 
-	var metadata Metadata
-	err = getResult.Content(&metadata)
-	if err != nil {
-		return 0, 0, err
-	}
+		var metadata Metadata
+		if err := getResult.Content(&metadata); err != nil {
+			return TimeframeEntry{}, err
+		}
 
-	rfc3339t := strings.Replace(metadata.Ts_start, " ", "T", 1)
-	tsStart, err := time.Parse(time.RFC3339, rfc3339t)
-	if err != nil {
-		return 0, 0, err
-	}
-	rfc3339t = strings.Replace(metadata.Ts_end, " ", "T", 1)
-	tsEnd, err := time.Parse(time.RFC3339, rfc3339t)
-	if err != nil {
-		return 0, 0, err
-	}
+		rfc3339t := strings.Replace(metadata.Ts_start, " ", "T", 1)
+		tsStart, err := time.Parse(time.RFC3339, rfc3339t)
+		if err != nil {
+			return TimeframeEntry{}, err
+		}
+		rfc3339t = strings.Replace(metadata.Ts_end, " ", "T", 1)
+		tsEnd, err := time.Parse(time.RFC3339, rfc3339t)
+		if err != nil {
+			return TimeframeEntry{}, err
+		}
 
-	start := tsStart.Unix()
-	end := tsEnd.Unix()
-	cb.Cache.Store(id, TimeframeEntry{
-		Start:     start,
-		End:       end,
-		FetchedAt: time.Now(),
+		timeframe := TimeframeEntry{
+			Start:     tsStart.Unix(),
+			End:       tsEnd.Unix(),
+			FetchedAt: time.Now(),
+		}
+		cb.Cache.Add(id, timeframe)
+
+		return timeframe, nil
 	})
-	// log.Printf("Fetched start time for job %s: %s (Unix s: %d)", id, metadata.Ts_start, start)
-	// log.Printf("Fetched end time for job %s: %s (Unix s: %d)", id, metadata.Ts_end, end)
+	if err != nil {
+		return 0, 0, err
+	}
 
-	return start, end, nil
+	timeframe, ok := value.(TimeframeEntry)
+	if !ok {
+		return 0, 0, ErrUnexpectedTimeframeType
+	}
+
+	if shared {
+		cb.debugf("singleflight shared fetch for job %s", id)
+	}
+
+	return timeframe.Start, timeframe.End, nil
 }
 
 func (cb *CouchbaseClient) debugf(format string, args ...any) {

@@ -7,7 +7,7 @@ import (
 
 const (
 	maxInFlightRequests     = 512
-	maxQueueWait            = 2.5 * time.Minute
+	maxQueueWait            = 150 * time.Second
 	serverReadHeaderTimeout = 5 * time.Second
 	serverWriteTimeout      = 120 * time.Second
 	serverIdleTimeout       = 120 * time.Second
