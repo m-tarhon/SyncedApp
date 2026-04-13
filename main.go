@@ -114,7 +114,7 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			overwriteTimeframe(&singleURL, tsStart, tsEnd)
 			if passthrough && q.Get("step") == "" {
 				q2 := singleURL.Query()
-				q2.Set("step", "60")
+				q2.Set("step", "15")
 				singleURL.RawQuery = q2.Encode()
 			}
 			singleReq.URL = &singleURL
