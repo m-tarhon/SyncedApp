@@ -18,7 +18,7 @@ const (
 	upstreamResponseTimeout = 30 * time.Second
 )
 
-func newUpstreamTransport(config AppConfig) *http.Transport {
+func newUpstreamTransport() *http.Transport {
 	baseTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return &http.Transport{
