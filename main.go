@@ -50,7 +50,7 @@ func NewProxyServer(config AppConfig) (*ProxyServer, error) {
 	}
 
 	ps.proxy.Transport = &splitQueryTransport{
-		base: newUpstreamTransport(config),
+		base: newUpstreamTransport(),
 		ps:   ps,
 	}
 
