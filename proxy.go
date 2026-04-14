@@ -11,14 +11,49 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"net/http/httputil"
+	"net/url"
+	
+	"golang.org/x/sync/errgroup"
 )
+
+func NewProxyServer(config AppConfig) (*ProxyServer, error) {
+	targetURL := config.PrometheusConnectionString
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, err
+	}
+
+	ps := &ProxyServer{
+		target: target,
+	}
+
+	ps.proxy = httputil.NewSingleHostReverseProxy(target)
+
+	originalDirector := ps.proxy.Director
+	ps.proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = target.Host
+		ps.inspectRequest(req)
+	}
+
+	ps.proxy.Transport = &splitQueryTransport{
+		base: newUpstreamTransport(),
+		ps:   ps,
+	}
+
+	ps.proxy.ErrorHandler = ps.handleProxyError
+	ps.proxy.ModifyResponse = ps.modifyResponse
+
+	return ps, nil
+}
 
 func (ps *ProxyServer) fetchFromCouchbase(jobID string) (int64, int64, error) {
 	return Cb.GetTimeframe(jobID)
 }
 
 func (ps *ProxyServer) inspectRequest(req *http.Request) {
-	ps.debugf("inspectRequest: %s %s", req.Method, req.URL.String())
+	ps.Logger.LogSplitting("inspectRequest: %s %s", req.Method, req.URL.String())
 	if req.Method != http.MethodGet {
 		return
 	}
@@ -66,14 +101,14 @@ func (ps *ProxyServer) inspectRequest(req *http.Request) {
 		}
 		ctx := context.WithValue(req.Context(), passthroughKey, true)
 		*req = *req.WithContext(ctx)
-		ps.debugf("passthrough range query for job: %s", jobID)
+		ps.Logger.LogSplitting("passthrough range query for job: %s", jobID)
 		return
 	}
 
 	jobMap := map[string]int64{jobID: tsStart}
 	ctx := context.WithValue(req.Context(), tsStartKey, jobMap)
 	*req = *req.WithContext(ctx)
-	ps.debugf("found job ID in query: %s", jobID)
+	ps.Logger.LogSplitting("found job ID in query: %s", jobID)
 }
 
 func (ps *ProxyServer) modifyResponse(resp *http.Response) error {
@@ -101,7 +136,7 @@ func (ps *ProxyServer) modifyResponse(resp *http.Response) error {
 		jobMap := tsVal.(map[string]int64)
 		var promData PromResponse
 		if err := json.Unmarshal(bodyBytes, &promData); err != nil {
-			log.Printf("Failed to unmarshal Prometheus response: %v", err)
+			ps.Logger.LogTimeseries("Failed to unmarshal Prometheus response: %v", err)
 			return nil
 		}
 
@@ -110,11 +145,9 @@ func (ps *ProxyServer) modifyResponse(resp *http.Response) error {
 		if modifiedBody, err := json.Marshal(promData); err == nil {
 			bodyBytes = modifiedBody
 		} else {
-			log.Printf("Failed to marshal modified Prometheus response: %v", err)
+			ps.Logger.LogTimeseries("Failed to marshal modified Prometheus response: %v", err)
 		}
 	}
-
-	ps.logResponseBody(resp.Header.Get("Content-Type"), bodyBytes)
 	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	resp.ContentLength = int64(len(bodyBytes))
 	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
@@ -128,7 +161,7 @@ func (ps *ProxyServer) handleProxyError(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if errors.Is(err, context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
-		ps.debugf("proxy request canceled by client: %v", err)
+		ps.Logger.LogSplitting("proxy request canceled by client: %v", err)
 		return
 	}
 
@@ -138,4 +171,163 @@ func (ps *ProxyServer) handleProxyError(w http.ResponseWriter, r *http.Request, 
 	}
 
 	http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+}
+func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctxJobIDs := req.Context().Value(jobIDsKey)
+	if ctxJobIDs == nil {
+		return t.base.RoundTrip(req)
+	}
+
+	jobIDs, ok := ctxJobIDs.([]string)
+	if !ok || len(jobIDs) <= 1 {
+		return t.base.RoundTrip(req)
+	}
+
+	originalQuery := req.URL.Query().Get("query")
+	if originalQuery == "" {
+		return t.base.RoundTrip(req)
+	}
+
+	passthrough := req.Context().Value(passthroughKey) != nil
+	if t.ps.Logger != nil {
+		t.ps.Logger.LogSplitting("Splitting multi-job query into %d upstream requests (passthrough=%v)", len(jobIDs), passthrough)
+	}
+
+	var merged PromResponse
+	merged.Status = "success"
+	merged.Data.ResultType = "matrix"
+
+	results := make([]splitResult, len(jobIDs))
+	g, gctx := errgroup.WithContext(req.Context())
+	g.SetLimit(6)
+
+	for idx, jobID := range jobIDs {
+		idx := idx
+		jobID := jobID
+
+		g.Go(func() error {
+			tsStart, tsEnd, err := t.ps.fetchFromCouchbase(jobID)
+			if err != nil {
+				log.Printf("Error fetching from Couchbase for %s: %v", jobID, err)
+				return nil
+			}
+
+			singleReq := req.Clone(gctx)
+			singleURL := *req.URL
+			q := singleURL.Query()
+			q.Set("query", replaceJobFilter(originalQuery, jobID))
+			singleURL.RawQuery = q.Encode()
+			overwriteTimeframe(&singleURL, tsStart, tsEnd)
+			if passthrough && q.Get("step") == "" {
+				q2 := singleURL.Query()
+				q2.Set("step", "15")
+				singleURL.RawQuery = q2.Encode()
+			}
+			singleReq.URL = &singleURL
+			singleReq.RequestURI = ""
+
+			cacheKey := BuildSplitCacheKey(singleURL.Path, singleURL.Query(), passthrough, jobID)
+			cached, found, cacheErr := t.ps.Cache.Get(cacheKey, jobID)
+			if cacheErr == nil && found {
+				results[idx] = splitResult{
+					statusCode: cached.StatusCode,
+					status:     cached.Status,
+					resultType: cached.ResultType,
+					result:     cached.Result,
+					success:    true,
+				}
+				return nil
+			}
+
+			resp, err := t.base.RoundTrip(singleReq)
+			if err != nil {
+				if gctx.Err() != nil {
+					return gctx.Err()
+				}
+				log.Printf("Error executing upstream request for %s: %v", jobID, err)
+				return nil
+			}
+
+			bodyBytes, err := decodeHTTPBody(resp)
+			resp.Body.Close()
+			if err != nil {
+				log.Printf("Error reading upstream response for %s: %v", jobID, err)
+				return nil
+			}
+
+			var promData PromResponse
+			if err := json.Unmarshal(bodyBytes, &promData); err != nil {
+				log.Printf("Failed to unmarshal upstream response for %s: %v", jobID, err)
+				return nil
+			}
+
+			if !passthrough {
+				applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
+			}
+
+			results[idx] = splitResult{
+				statusCode: resp.StatusCode,
+				status:     resp.Status,
+				resultType: promData.Data.ResultType,
+				result:     promData.Data.Result,
+				success:    true,
+			}
+
+			cacheValue := CachedSplitResult{
+				StatusCode: resp.StatusCode,
+				Status:     resp.Status,
+				ResultType: promData.Data.ResultType,
+				Result:     promData.Data.Result,
+			}
+			_ = t.ps.Cache.Set(cacheKey, jobID, cacheValue)
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	successCount := 0
+	statusCode := http.StatusOK
+	status := http.StatusText(http.StatusOK)
+
+	for _, r := range results {
+		if !r.success {
+			continue
+		}
+
+		merged.Data.Result = append(merged.Data.Result, r.result...)
+		if successCount == 0 {
+			statusCode = r.statusCode
+			status = r.status
+			if r.resultType != "" {
+				merged.Data.ResultType = r.resultType
+			}
+		}
+		successCount++
+	}
+
+	if successCount == 0 {
+		return nil, errors.New("all split upstream requests failed")
+	}
+
+	bodyBytes, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal merged response: %w", err)
+	}
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+
+	return &http.Response{
+		Status:        status,
+		StatusCode:    statusCode,
+		Header:        headers,
+		Body:          io.NopCloser(bytes.NewReader(bodyBytes)),
+		ContentLength: int64(len(bodyBytes)),
+		Request:       req,
+	}, nil
 }
