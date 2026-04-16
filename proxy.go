@@ -10,9 +10,9 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	
 	"golang.org/x/sync/errgroup"
 )
@@ -233,19 +233,74 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			singleReq.RequestURI = ""
 
 			cacheKey := BuildSplitCacheKey(singleURL.Path, singleURL.Query(), passthrough, jobID)
-			cached, found, cacheErr := t.ps.Cache.Get(cacheKey, jobID)
-			if cacheErr == nil && found {
-				results[idx] = splitResult{
-					statusCode: cached.StatusCode,
-					status:     cached.Status,
-					resultType: cached.ResultType,
-					result:     cached.Result,
-					success:    true,
+			if t.ps.Cache != nil {
+				cached, found, cacheErr := t.ps.Cache.Get(cacheKey, jobID)
+				if cacheErr == nil && found {
+					results[idx] = splitResult{
+						statusCode: cached.StatusCode,
+						status:     cached.Status,
+						resultType: cached.ResultType,
+						result:     cached.Result,
+						success:    true,
+					}
+					return nil
 				}
-				return nil
 			}
 
-			resp, err := t.base.RoundTrip(singleReq)
+			v, err, _ := t.ps.SplitGroup.Do(cacheKey, func() (interface{}, error) {
+				if t.ps.Cache != nil {
+					cached, found, cacheErr := t.ps.Cache.Get(cacheKey, jobID)
+					if cacheErr == nil && found {
+						return splitResult{
+							statusCode: cached.StatusCode,
+							status:     cached.Status,
+							resultType: cached.ResultType,
+							result:     cached.Result,
+							success:    true,
+						}, nil
+					}
+				}
+
+				resp, err := t.base.RoundTrip(singleReq)
+				if err != nil {
+					return nil, err
+				}
+
+				bodyBytes, err := decodeHTTPBody(resp)
+				resp.Body.Close()
+				if err != nil {
+					return nil, err
+				}
+
+				var promData PromResponse
+				if err := json.Unmarshal(bodyBytes, &promData); err != nil {
+					return nil, err
+				}
+
+				if !passthrough {
+					applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
+				}
+
+				out := splitResult{
+					statusCode: resp.StatusCode,
+					status:     resp.Status,
+					resultType: promData.Data.ResultType,
+					result:     promData.Data.Result,
+					success:    true,
+				}
+
+				if t.ps.Cache != nil && resp.StatusCode == http.StatusOK && promData.Status == "success" {
+					cacheValue := CachedSplitResult{
+						StatusCode: resp.StatusCode,
+						Status:     resp.Status,
+						ResultType: promData.Data.ResultType,
+						Result:     promData.Data.Result,
+					}
+					_ = t.ps.Cache.Set(cacheKey, jobID, cacheValue)
+				}
+
+				return out, nil
+			})
 			if err != nil {
 				if gctx.Err() != nil {
 					return gctx.Err()
@@ -254,38 +309,12 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 				return nil
 			}
 
-			bodyBytes, err := decodeHTTPBody(resp)
-			resp.Body.Close()
-			if err != nil {
-				log.Printf("Error reading upstream response for %s: %v", jobID, err)
+			splitOut, ok := v.(splitResult)
+			if !ok {
+				log.Printf("Error decoding split result for %s: unexpected type %T", jobID, v)
 				return nil
 			}
-
-			var promData PromResponse
-			if err := json.Unmarshal(bodyBytes, &promData); err != nil {
-				log.Printf("Failed to unmarshal upstream response for %s: %v", jobID, err)
-				return nil
-			}
-
-			if !passthrough {
-				applyJobOffsetsAndFilter(&promData, map[string]int64{jobID: tsStart})
-			}
-
-			results[idx] = splitResult{
-				statusCode: resp.StatusCode,
-				status:     resp.Status,
-				resultType: promData.Data.ResultType,
-				result:     promData.Data.Result,
-				success:    true,
-			}
-
-			cacheValue := CachedSplitResult{
-				StatusCode: resp.StatusCode,
-				Status:     resp.Status,
-				ResultType: promData.Data.ResultType,
-				Result:     promData.Data.Result,
-			}
-			_ = t.ps.Cache.Set(cacheKey, jobID, cacheValue)
+			results[idx] = splitOut
 
 			return nil
 		})

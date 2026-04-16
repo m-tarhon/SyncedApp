@@ -95,7 +95,9 @@ func (c *QueryResultCache) Get(key, label string) (CachedSplitResult, bool, erro
 	item, err := c.client.Get(key)
 	if err != nil {
 		if err == memcache.ErrCacheMiss {
-			c.logger.LogCache("MISS  job=%s key=%.16s...", label, key)
+			if c.logger != nil {
+				c.logger.LogCache("MISS  job=%s key=%.16s...", label, key)
+			}
 			return CachedSplitResult{}, false, nil
 		}
 		log.Printf("[cache] ERROR get job=%s key=%.16s... err=%v", label, key, err)
@@ -108,7 +110,9 @@ func (c *QueryResultCache) Get(key, label string) (CachedSplitResult, bool, erro
 		return CachedSplitResult{}, false, err
 	}
 
-	c.logger.LogCache("HIT   job=%s key=%.16s... series=%d", label, key, len(decoded.Result))
+	if c.logger != nil {
+		c.logger.LogCache("HIT   job=%s key=%.16s... series=%d", label, key, len(decoded.Result))
+	}
 
 	return decoded, true, nil
 }
@@ -140,7 +144,9 @@ func (c *QueryResultCache) Set(key, label string, value CachedSplitResult) error
 		return err
 	}
 
-	c.logger.LogCache("SET   job=%s key=%.16s... bytes=%d ttl=%ds series=%d", label, key, len(encoded), c.ttlSeconds, len(value.Result))
+	if c.logger != nil {
+		c.logger.LogCache("SET   job=%s key=%.16s... bytes=%d ttl=%ds series=%d", label, key, len(encoded), c.ttlSeconds, len(value.Result))
+	}
 
 	return nil
 }

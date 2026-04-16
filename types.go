@@ -33,6 +33,7 @@ type ProxyServer struct {
 	proxy   *httputil.ReverseProxy
 	Cache   *QueryResultCache
 	Logger  *Logger
+	SplitGroup singleflight.Group
 }
 
 type splitQueryTransport struct {
