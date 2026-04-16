@@ -58,9 +58,15 @@ func (ps *ProxyServer) inspectRequest(req *http.Request) {
 		return
 	}
 
+	isQuery := strings.HasSuffix(req.URL.Path, "/api/v1/query")
+	isQueryRange := strings.HasSuffix(req.URL.Path, "/api/v1/query_range")
+	if !isQuery && !isQueryRange {
+		return
+	}
+
 	// Instant queries with a "time" param are converted to range queries using
 	// the full Couchbase-stored timeframe; results are forwarded as-is (no offset shift).
-	isInstantQuery := strings.HasSuffix(req.URL.Path, "/api/v1/query") &&
+	isInstantQuery := isQuery &&
 		req.URL.Query().Get("time") != ""
 	if isInstantQuery {
 		req.URL.Path = strings.TrimSuffix(req.URL.Path, "/query") + "/query_range"
