@@ -98,3 +98,8 @@ Notes:
 - Split result caching is key-based per job and query params.
 - Cross-request singleflight deduplicates concurrent misses for the same cache key.
 - Shared upstream fetches run with a detached, bounded context to avoid one canceled caller canceling all waiters.
+
+## Notes on Grafana Scenes Integration
+- Can be used as a Grafana Prometheus Datasource inside Dashboards built with Grafana Scenes
+- Panels' time field should be overriden to start from 0 and end at the longest duration between the overlapped series 
+- Doesn't require a decoupling between QueryRunner time range and panel time range since the proxy overwrites query time range with metadata correct timeframe
