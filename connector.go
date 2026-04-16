@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"log"
 	"strings"
 	"time"
 
@@ -17,7 +16,7 @@ const (
 
 var ErrUnexpectedTimeframeType = errors.New("unexpected timeframe cache value type")
 
-func ConnectCouchbase(connectionString, username, password, bucketName string, debug bool) (*CouchbaseClient, error) {
+func ConnectCouchbase(connectionString, username, password, bucketName string) (*CouchbaseClient, error) {
 	opts := gocb.ClusterOptions{
 		Authenticator: gocb.PasswordAuthenticator{
 			Username: username,
@@ -41,18 +40,16 @@ func ConnectCouchbase(connectionString, username, password, bucketName string, d
 	return &CouchbaseClient{
 		Cluster: cluster,
 		Bucket:  bucket,
-		Debug:   debug,
 		Cache:   expirable.NewLRU[string, TimeframeEntry](timeframeCacheSize, nil, timeframeCacheTTL),
 	}, nil
 }
 
 func (cb *CouchbaseClient) GetTimeframe(id string) (int64, int64, error) {
 	if timeframe, found := cb.Cache.Get(id); found {
-		cb.debugf("Cache hit for job %s: start=%d, end=%d", id, timeframe.Start, timeframe.End)
 		return timeframe.Start, timeframe.End, nil
 	}
 
-	value, err, shared := cb.Group.Do(id, func() (any, error) {
+	value, err, _ := cb.Group.Do(id, func() (any, error) {
 		if timeframe, found := cb.Cache.Get(id); found {
 			return timeframe, nil
 		}
@@ -97,17 +94,5 @@ func (cb *CouchbaseClient) GetTimeframe(id string) (int64, int64, error) {
 		return 0, 0, ErrUnexpectedTimeframeType
 	}
 
-	if shared {
-		cb.debugf("singleflight shared fetch for job %s", id)
-	}
-
 	return timeframe.Start, timeframe.End, nil
-}
-
-func (cb *CouchbaseClient) debugf(format string, args ...any) {
-	if !cb.Debug {
-		return
-	}
-
-	log.Printf(format, args...)
 }

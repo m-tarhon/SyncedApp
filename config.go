@@ -21,7 +21,14 @@ func loadConfig() (AppConfig, error) {
 		Password:                   os.Getenv("PASSWORD"),
 		MetadataBucketName:         os.Getenv("METADATA_BUCKET_NAME"),
 		PrometheusConnectionString: os.Getenv("PROMETHEUS_CONNECTION_STRING"),
-		DebugLogging:               getEnvAsBool("DEBUG_LOGGING", false),
+		MemcachedEnabled:           getEnvAsBool("MEMCACHED_ENABLED", false),
+		MemcachedAddrs:             getEnvOrDefault("MEMCACHED_ADDRS", "localhost:11211"),
+		MemcachedTTLSeconds:        getEnvAsInt("MEMCACHED_TTL_SECONDS", 300),
+		MemcachedTimeoutMS:         getEnvAsInt("MEMCACHED_TIMEOUT_MS", 100),
+		MemcachedMaxItemBytes:      getEnvAsInt("MEMCACHED_MAX_ITEM_BYTES", 900000),
+		LogCache:                   getEnvAsBool("LOG_CACHE", true),
+		LogTimeseries:              getEnvAsBool("LOG_TIMESERIES", false),
+		LogSplitting:               getEnvAsBool("LOG_SPLITTING", false),
 	}
 
 	if config.CouchbaseConnectionString == "" {

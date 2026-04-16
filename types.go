@@ -31,13 +31,30 @@ type Result struct {
 type ProxyServer struct {
 	target  *url.URL
 	proxy   *httputil.ReverseProxy
-	Debug   bool
-	Verbose bool
+	Cache   *QueryResultCache
+	Logger  *Logger
+	SplitGroup singleflight.Group
 }
 
 type splitQueryTransport struct {
 	base http.RoundTripper
 	ps   *ProxyServer
+}
+
+// split query result types
+type splitResult struct {
+	statusCode int
+	status     string
+	resultType string
+	result     []Result
+	success    bool
+}
+
+type CachedSplitResult struct {
+	StatusCode int      `json:"statusCode"`
+	Status     string   `json:"status"`
+	ResultType string   `json:"resultType"`
+	Result     []Result `json:"result"`
 }
 
 // config related types
@@ -49,14 +66,20 @@ type AppConfig struct {
 	Password                   string
 	MetadataBucketName         string
 	PrometheusConnectionString string
-	DebugLogging               bool
+	MemcachedEnabled           bool
+	MemcachedAddrs             string
+	MemcachedTTLSeconds        int
+	MemcachedTimeoutMS         int
+	MemcachedMaxItemBytes      int
+	LogCache                   bool
+	LogTimeseries              bool
+	LogSplitting               bool
 }
 
 // couchbase client types
 type CouchbaseClient struct {
 	Cluster *gocb.Cluster
 	Bucket  *gocb.Bucket
-	Debug   bool
 	Cache   *expirable.LRU[string, TimeframeEntry]
 	Group   singleflight.Group
 }

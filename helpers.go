@@ -10,25 +10,6 @@ import (
 	"strings"
 )
 
-// proxy server specific helpers
-func (ps *ProxyServer) debugf(format string, args ...any) {
-	if !ps.Debug {
-		return
-	}
-
-	log.Printf(format, args...)
-}
-
-// logResponseBody is the function you can comment in/out or toggle via ps.Verbose
-func (ps *ProxyServer) logResponseBody(contentType string, body []byte) {
-	if !ps.Verbose {
-		return
-	}
-	if contentType == "application/json" {
-		log.Printf("JSON Response: %s", string(body))
-	}
-}
-
 // response body helpers
 func decodeHTTPBody(resp *http.Response) ([]byte, error) {
 	if resp.Header.Get("Content-Encoding") == "gzip" {
