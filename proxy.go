@@ -171,7 +171,7 @@ func (ps *ProxyServer) handleProxyError(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	log.Printf("proxy upstream error: %v", err)
+	ps.Logger.LogSplitting("proxy upstream error: %v", err)
 	if r.Context().Err() != nil {
 		return
 	}
@@ -214,11 +214,10 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		g.Go(func() error {
 			tsStart, tsEnd, err := t.ps.fetchFromCouchbase(jobID)
 			if err != nil {
-				log.Printf("Error fetching from Couchbase for %s: %v", jobID, err)
+				t.ps.Logger.LogSplitting("Error fetching from Couchbase for %s: %v", jobID, err)
 				return nil
 			}
 
-			singleReq := req.Clone(gctx)
 			singleURL := *req.URL
 			q := singleURL.Query()
 			q.Set("query", replaceJobFilter(originalQuery, jobID))
@@ -229,9 +228,6 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 				q2.Set("step", "15")
 				singleURL.RawQuery = q2.Encode()
 			}
-			singleReq.URL = &singleURL
-			singleReq.RequestURI = ""
-
 			cacheKey := BuildSplitCacheKey(singleURL.Path, singleURL.Query(), passthrough, jobID)
 			if t.ps.Cache != nil {
 				cached, found, cacheErr := t.ps.Cache.Get(cacheKey, jobID)
@@ -247,7 +243,7 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 				}
 			}
 
-			v, err, _ := t.ps.SplitGroup.Do(cacheKey, func() (interface{}, error) {
+			resultCh := t.ps.SplitGroup.DoChan(cacheKey, func() (interface{}, error) {
 				if t.ps.Cache != nil {
 					cached, found, cacheErr := t.ps.Cache.Get(cacheKey, jobID)
 					if cacheErr == nil && found {
@@ -261,7 +257,15 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 					}
 				}
 
-				resp, err := t.base.RoundTrip(singleReq)
+				upstreamCtx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), upstreamResponseTimeout)
+				defer cancel()
+
+				upstreamReq := req.Clone(upstreamCtx)
+				upstreamURL := singleURL
+				upstreamReq.URL = &upstreamURL
+				upstreamReq.RequestURI = ""
+
+				resp, err := t.base.RoundTrip(upstreamReq)
 				if err != nil {
 					return nil, err
 				}
@@ -301,17 +305,33 @@ func (t *splitQueryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 				return out, nil
 			})
-			if err != nil {
+
+			var v interface{}
+			select {
+			case <-gctx.Done():
+				return gctx.Err()
+			case res := <-resultCh:
+				if res.Err != nil {
+					if gctx.Err() != nil {
+						return gctx.Err()
+					}
+					t.ps.Logger.LogSplitting("Error executing upstream request for %s: %v", jobID, res.Err)
+					return nil
+				}
+				v = res.Val
+			}
+
+			if v == nil {
 				if gctx.Err() != nil {
 					return gctx.Err()
 				}
-				log.Printf("Error executing upstream request for %s: %v", jobID, err)
+				t.ps.Logger.LogSplitting("Error executing upstream request for %s: empty singleflight result", jobID)
 				return nil
 			}
 
 			splitOut, ok := v.(splitResult)
 			if !ok {
-				log.Printf("Error decoding split result for %s: unexpected type %T", jobID, v)
+				t.ps.Logger.LogSplitting("Error decoding split result for %s: unexpected type %T", jobID, v)
 				return nil
 			}
 			results[idx] = splitOut
