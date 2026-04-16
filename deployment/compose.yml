@@ -1,0 +1,21 @@
+services:
+  syncedapp:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    depends_on:
+      syncedapp-memcached:
+        condition: service_started
+    env_file:
+      - ../.env
+    environment:
+      MEMCACHED_ENABLED: "true"
+      MEMCACHED_ADDRS: syncedapp-memcached:11211
+    ports:
+      - 5000:5000
+
+  syncedapp-memcached:
+    image: memcached:1.6-alpine
+    command: ["memcached", "-m", "256", "-I", "2m"]
+    ports:
+      - 11211:11211

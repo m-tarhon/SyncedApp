@@ -9,7 +9,7 @@ import (
 )
 
 func loadConfig() (AppConfig, error) {
-	if err := godotenv.Load(); err != nil {
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
 		return AppConfig{}, fmt.Errorf("load .env: %w", err)
 	}
 
@@ -26,7 +26,7 @@ func loadConfig() (AppConfig, error) {
 		MemcachedTTLSeconds:        getEnvAsInt("MEMCACHED_TTL_SECONDS", 300),
 		MemcachedTimeoutMS:         getEnvAsInt("MEMCACHED_TIMEOUT_MS", 100),
 		MemcachedMaxItemBytes:      getEnvAsInt("MEMCACHED_MAX_ITEM_BYTES", 900000),
-		LogCache:                   getEnvAsBool("LOG_CACHE", true),
+		LogCache:                   getEnvAsBool("LOG_CACHE", false),
 		LogTimeseries:              getEnvAsBool("LOG_TIMESERIES", false),
 		LogSplitting:               getEnvAsBool("LOG_SPLITTING", false),
 	}
